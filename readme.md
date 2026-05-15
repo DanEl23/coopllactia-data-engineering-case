@@ -1,22 +1,15 @@
-# Coopllactia - Data Engineering Challenge
+# PoC: Pipeline de Ingestão e Processamento Analítico para a Coopllactia
 
-> Transformando Dados Brutos em Inteligência Logística para Laticínios
-
-![Python](https://img.shields.io/badge/Python-3.13+-blue?style=flat-square&logo=python)
-![DuckDB](https://img.shields.io/badge/DuckDB-OLAP-brightgreen?style=flat-square)
-![Parquet](https://img.shields.io/badge/Parquet-Columnar-orange?style=flat-square)
-![Architecture](https://img.shields.io/badge/Architecture-Medallion-red?style=flat-square)
-![Data Contract](https://img.shields.io/badge/Data%20Contract-Shift%20Left-purple?style=flat-square)
+![](https://img.shields.io/badge/DuckDB-OLAP-blue?style=flat)
+![](https://img.shields.io/badge/Parquet-Columnar-green?style=flat)
+![](https://img.shields.io/badge/Shift--Left-Data--Quality-orange?style=flat)  
+**Status: PoC / MVP Local**
 
 ---
 
-## 📑 Índice
+## Sumário Executivo
 
-- [Apresentação Executiva](#apresentação-executiva)
-- [Modelo de Dados](#modelo-de-dados)
-- [Execução](#execução)
-- [Decisões de Design](#decisões-de-design)
-- [Roadmap](#roadmap)
+Este documento descreve um pipeline de dados para a Coopllactia que materializa o contrato de governança em um sistema funcional de Bronze-Silver-Gold. O objetivo é fornecer visibilidade sobre perdas operacionais quantificadas em R$ 164 mil mensais via rotas ineficientes e rejeição de leite por qualidade inadequada.
 
 ---
 
@@ -27,29 +20,31 @@
 
 ### O Problema
 
-A Coopllactia opera uma frota de caminhões isotérmicos que realizam captação de leite bruto em fazendas espalhadas pela Bacia Leiteira de Minas Gerais. Hoje, a operação enfrenta dois desafios econômicos críticos:
+A Coopllactia opera uma frota de caminhões isotérmicos que realizam captação de leite bruto em ~50 fazendas da Bacia Leiteira de MG. Dois vetores de perda financeira dominam a operação:
 
-| Desafio | Impacto | Causa Raiz |
-|---------|--------|-----------|
-| **Perda de Produto** | 5-10% dos lotes rejeitados na chegada à fábrica | Acidez elevada (pH > 6.8) ou quebra de cadeia de frio (T > 6°C) |
-| **Custo Logístico Ocioso** | Caminhões rodando ~60% ocupados | Falta de visibilidade: sem dados sobre eficiência de rota e cooperado |
-| **Falta de Rastreabilidade** | Impossível rastrear qual fazenda/rota gerou rejeição | Dados soltos em SPADs e cadernetas de colheita |
+### Vetor 1: Perda de Produto
 
-### O Efeito Econômico
+Um lote rejeitado na fábrica por acidez elevada (pH > 6.8) ou temperatura de transporte inadequada (> 6°C) gera:
 
-Um caminhão que percorre 100 km para coletar 5.000 L em uma fazenda e tem o lote **rejeitado por acidez** gera:
-- **Perda de receita:** 5.000 L × R$ 1,50 (preço mínimo) = R$ 7.500
-- **Custo de frete:** 100 km × R$ 7/km (custo fixo) = R$ 700
-- **Custo total não recuperado:** R$ 8.200
+- **Perda de receita:** 5.000 L × R$ 1,50/L = R$ 7.500
+- **Custo de frete não recuperado:** 100 km × R$ 7/km = R$ 700
+- **Perda observada:** ~20 rejeições/mês × R$ 8.200 = **R$ 164 mil/mês**
 
-Multiplicado por 20 rejeições/mês em uma cooperativa de 50 fornecedores = **R$ 164 mil em perda mensal**.
+### Vetor 2: Custo Logístico Ocioso
 
-### A Solução: Data as a Product
+Caminhões rodam com ocupação média de 60% do tanque (dados não documentados). Falta de visibilidade sobre:
+- Qual fazenda gera rejeiçõ frequentes (baixa qualidade)
+- Qual rota tem ocupação baixa (ineficiência)
+- Qual veículo apresenta anomalias de refrigeração
 
-Este pipeline estabelece uma **Infraestrutura de Dados** que permite:
-1. **Detectar em tempo real** quais são os 5% de fazendas/rotas que geram rejeições
-2. **Quantificar o custo** de cada anomalia logística
-3. **Alimentar decisões operacionais**: auditoria de fornecedores, manutenção preventiva, replanejamento de rotas
+### Objetivo da Infraestrutura
+
+Fornecer **observabilidade** sobre essas perdas por meio de:
+1. Rastreamento completo de coleta → processamento
+2. Detecção automática de anomalias (temperatura, acidez)
+3. KPIs por fazenda e por rota
+
+Isso **não resolve economicamente o problema**, mas permite que a operação tome decisões informadas (auditoria de fornecedores, manutenção preventiva, replanejamento de rotas).
 
 </details>
 
@@ -64,7 +59,7 @@ O **Contrato de Dados** é um documento que formaliza, **antes de qualquer inges
 
 - **Reduz ciclo de correção:** Anomalias conhecidas são tratadas automaticamente pelo ETL
 - **Previne propagação de erro:** Dados ruins não chegam à camada Silver
-- **Contrato com stakeholders:** Analistas sabem que dados na camada Gold passaram por validações rigorosas
+- **Contrato com stakeholders:** Analistas consomem dados garantidamente válidos. Engenheiros podem investigar root causes.
 
 ### Artefato
 
@@ -75,18 +70,25 @@ Consulte [**docs/data_contract.md**](docs/data_contract.md) para:
 
 ### Implementação
 
-As validações não são hard-coded em Python. O SQL de transformação implementa constraints declarativamente:
+Em vez de Python defensivo (checos esparsos), o contrato é **formalizado em SQL declarativo**:
 
 ```sql
--- Detectar temperaturas fora do padrão (Expectativa: 2-6°C)
-SELECT *
-FROM fact_coleta
-WHERE temperatura_c < 2.0 OR temperatura_c > 6.0
-  OR temperatura_c IS NULL
-INTO suspicious_coletas;
+-- Silver Layer: Detectar anomalias
+SELECT id_coleta, 'TEMP_OUT_RANGE' as issue
+FROM raw.fact_coleta
+WHERE temperatura_c < 2.0 OR temperatura_c > 6.0 OR temperatura_c IS NULL;
+
+SELECT id_coleta, 'ORPHAN_FK' as issue
+FROM raw.fact_coleta fc
+WHERE fc.id_cooperado NOT IN (SELECT id_cooperado FROM raw.dim_cooperado);
 ```
 
-Cada anomalia é registrada em tabela de **Data Quality Issues** para auditoria.
+Registros problemáticos:
+- Não são deletados (auditoria exige rastreabilidade)
+- Recebem flag qualidade (`quality_flag='ANOMALY'`)
+- São **permitidos na Silver** mas **bloqueados da Gold**
+
+Resultado: Analistas consomem dados garantidamente válidos. Engenheiros podem investigar root causes.
 
 </details>
 
@@ -97,15 +99,14 @@ Cada anomalia é registrada em tabela de **Data Quality Issues** para auditoria.
 
 ```mermaid
 graph LR
-    A["Sistema Transacional"] -->|Raw Data| B["Bronze Layer<br/>CSV"]
-    B -->|Python Faker| C["💾 generate_data.py"]
-    C -->|500 coletas 480 processos| D["data/raw/"]
-    D -->|DuckDB SQL| E["🔄 etl_duckdb.py"]
-    E -->|Validação Declarativa| F["Silver Layer<br/>Parquet"]
-    F -->|Agregação| G["Gold Layer<br/>KPIs"]
-    G -->|BI Tools| H["📊 Dashboards"]
+    A["Sistema Transacional<br/>Simulado"] -->|raw CSV| B["Bronze<br/>data/raw/"]
+    B -->|Python Faker +<br/>Anomalias Injetadas| C["generate_data.py"]
+    C -->|500 coletas, 480 processamentos| D["CSV com erros"]
+    D -->|DuckDB SQL| E["etl_duckdb.py"]
+    E -->|Validação Contrato| F["Silver<br/>data/silver/"]
+    F -->|Agregação| G["Gold<br/>data/gold/"]
+    G -->|Parquet| H["BI / Análises"]
     
-    style A fill:#f0f0f0
     style B fill:#ffcccc
     style F fill:#ccffcc
     style G fill:#ccccff
@@ -113,79 +114,93 @@ graph LR
 
 ### Camadas
 
-#### **Bronze (Raw)**
-- Dados tal como chegam do sistema transacional
-- Formato: CSV (simples, legível)
-- Localização: `data/raw/`
-- Contém anomalias intencionais
-- **Purpose:** Auditoria e reprocessamento
+#### Bronze (Raw)
+- **O quê:** Dados tal como chegam do sistema transacional
+- **Formato:** CSV (simples, auditável)
+- **Localização:** `data/raw/`
+- **Características:** Contém anomalias intencionais (22 temperaturas nulas, 2 FKs órfãs, 7 pH fora de padrão)
+- **Retenção:** 30 dias; backup para investigação
 
-#### **Silver (Clean)**
-- Dados validados, transformados, enriquecidos
-- Formato: Parquet (compressão, desempenho)
-- Localização: `data/silver/`
-- 100% das linhas respeitam contratos de dados
-- **Purpose:** Fonte única de verdade
+#### Silver (Clean)
+- **O quê:** Dados validados contra contrato; flags de qualidade adicionadas
+- **Formato:** Parquet (compressão 8-10x, acesso colunar)
+- **Localização:** `data/silver/`
+- **Características:** Integridade de FKs garantida; anomalias persistidas com metadados
+- **Retenção:** 1 ano; histórico para reprocessamento
 
-#### **Gold (Analytics)**
-- Agregações consolidadas para negócio
-- Formato: Parquet particionado
-- Localização: `data/gold/`
-- Exemplos: `kpi_rejeicoes_por_fazenda`, `kpi_eficiencia_logistica`
-- **Purpose:** Alimentar dashboards e BI
+#### Gold (Analytics)
+- **O quê:** Agregações consolidadas para consumo de negócio
+- **Formato:** Parquet particionado por `data_processamento`
+- **Localização:** `data/gold/`
+- **Exemplos:** `kpi_eficiencia_logistica.parquet`, `kpi_rejeicoes_por_cooperado.parquet`
+- **SLA:** Upstream (Silver) atualizada diariamente; Gold atualizada D+1
 
-### Tecnologias
+### Escolha de Tecnologias
 
-| Componente | Tecnologia | Razão |
-|-----------|-----------|-------|
-| **Síntese** | Faker (Python) | Dados realistas com distribuições; anomalias injetadas |
-| **Processamento** | DuckDB (OLAP) | Vetorizado, sem servidor, SQL nativo ANSI |
-| **Armazenamento** | Parquet | Colunar, comprimido 8-10x, compatível com Spark/BQ |
-| **Orquestração** | Script Python | Simples, reprodutível, ideal para MVP |
+| Componente | Tecnologia | Critério |
+|---|---|---|
+| Síntese | Python Faker | Dados realistas com distribuição; anomalias injetadas manualmente |
+| Processamento | DuckDB | OLAP vetorizado, sem servidor, SQL ANSI (portável) |
+| Armazenamento | Parquet | Columnar, comprimido, compatível com Spark/BigQuery |
+| Orquestração | Script Python | MVP local; escalará com Airflow em produção |
+
+**Trade-off DuckDB:** Ótimo até ~50 GB. Acima disso, migrar para BigQuery/Snowflake mantendo a mesma SQL.
 
 </details>
 
 <details>
 <summary><b>04. Resiliência: Tratamento de Anomalias</b></summary>
 
-### Anomalias Injetadas
+### Anomalias Injetadas (Geração)
 
-Durante síntese de dados (`generate_data.py`), anomalias conhecidas são injetadas propositalmente:
+Durante `generate_data.py`, injetamos anomalias para simular falhas reais:
 
-#### Em `fact_coleta` (500 registros)
+#### fact_coleta (500 registros)
 
-| Anomalia | % | Simula | Tratamento |
-|----------|---|--------|-----------|
-| Temperatura NULL | 5% | Sensor com falha | Flag `TEMP_MISSING` para imputação |
-| FK Órfã (id_cooperado) | 1% | Erro manual de digitação | Rejeição; ingestion log |
-| Volume > Capacidade | 0% | Nunca ocorre | N/A |
+| Anomalia | % | Cenário Real | Tratamento Silver |
+|---|---|---|---|
+| temperatura_c NULL | 5% | Sensor com falha / não registrado | Imputação com 4.0°C (média esperada) + flag `TEMP_MISSING` |
+| id_cooperado órfão | 1% | Digitação manual com erro | Rejeição de linha; log `ORPHAN_FK` |
+| volume > capacidade_veiculo | 0% | **Nunca ocorre neste MVP** | N/A (validação no gerador garante restrição) |
 
-#### Em `fact_processamento` (480 registros)
+#### fact_processamento (480 registros)
 
-| Anomalia | % | Simula | Tratamento |
-|----------|---|--------|-----------|
-| Acidez fora de range | 3% | Leite estragado | Flag `ACIDEZ_ALTA`; rastreamento inverso |
-| Status/Motivo inconsistente | 5% | Rejeição s/ documentação | Validação SQL: `IF status='Rejeitado' THEN motivo NOT NULL` |
+| Anomalia | % | Cenário Real | Tratamento Silver |
+|---|---|---|---|
+| acidez_ph < 6.6 ou > 6.8 | 3% | Leite ácido / contaminação | Persiste em Silver; flag `ACIDEZ_ANÔMALA` |
+| status='Rejeitado' sem motivo | 5% | Rejeição mal documentada | Detecção SQL; Anomaly Log |
 
-### SQL Defensivo
+### SQL: Validação Declarativa
 
 ```sql
--- Detecção de anomalias na Silver Layer
-WITH anomalies AS (
-  SELECT 'TEMP_MISSING' as issue, id_coleta, 'fact_coleta' as table_name
-  FROM raw.fact_coleta WHERE temperatura_c IS NULL
-  UNION ALL
-  SELECT 'ORPHAN_RECORD' as issue, id_coleta, 'fact_coleta'
-  FROM raw.fact_coleta fc
-  WHERE fc.id_cooperado NOT IN (SELECT id_cooperado FROM raw.dim_cooperado)
+-- Detecção de anomalias (Silver layer)
+INSERT INTO silver.data_quality_issues
+SELECT
+  fc.id_coleta,
+  'TEMP_MISSING_IMPUTED' as issue,
+  fc.temperatura_c,
+  CURRENT_TIMESTAMP
+FROM raw.fact_coleta fc
+WHERE fc.temperatura_c IS NULL;
+
+-- Imputação condicional
+WITH imputed AS (
+  SELECT
+    id_coleta,
+    COALESCE(temperatura_c, 4.0) as temperatura_c_clean,
+    CASE WHEN temperatura_c IS NULL THEN 'IMPUTED' ELSE 'CLEAN' END as quality_flag
+  FROM raw.fact_coleta
 )
-SELECT * FROM anomalies;
+SELECT * FROM imputed;
 ```
 
-**Tratamento:**
-- Anomalias críticas (FKs): Rejeição + log
-- Anomalias recuperáveis (temperatura nula): Imputação + flag
-- Anomalias de negócio (pH alto): Persistência com flag + alertas
+### Limitações do MVP
+
+1. **Cenários de volume > capacidade_veiculo:** Não foram mapeados. O gerador garante `volume <= capacidade`, logo o pipeline Silver não trata esse edge case. **Ação:** Adicionar validação explícita quando dados reais chegarem.
+
+2. **Integridade referencial bidirecional:** Validamos FK (coleta → cooperado). **Não verificamos** se um cooperado remarcado como inativo ainda tem coletas ativas. **Ação:** Requerer full compliance no Data Warehouse com regra de verificação periódica.
+
+3. **Drift de schema:** Se novo campo chegar na Bronze, pipeline quebra. **Ação:** Adicionar schema validation com Great Expectations.
 
 </details>
 
@@ -196,70 +211,47 @@ SELECT * FROM anomalies;
 
 ```sql
 SELECT
-  id_veiculo,
+  dv.id_veiculo,
+  dv.placa,
   COUNT(*) as num_coletas,
-  SUM(volume_coletado_l) as volume_total_l,
-  SUM(distancia_percorrida_km) as distancia_total_km,
-  ROUND(SUM(volume_coletado_l) / NULLIF(SUM(distancia_percorrida_km), 0), 2) 
-    as eficiencia_l_per_km
+  ROUND(SUM(fc.volume_coletado_l) / 1000.0, 2) as volume_mil_litros,
+  ROUND(SUM(fc.distancia_percorrida_km), 1) as distancia_km,
+  ROUND(
+    SUM(fc.volume_coletado_l) / NULLIF(SUM(fc.distancia_percorrida_km), 0), 2
+  ) as litros_por_km,
+  ROUND(litros_por_km * dv.custo_fixo_km, 2) as custo_operacional_total
 FROM silver.fact_coleta fc
-GROUP BY id_veiculo
-ORDER BY eficiencia_l_per_km DESC;
+INNER JOIN silver.dim_veiculo dv ON fc.id_veiculo = dv.id_veiculo
+GROUP BY dv.id_veiculo, dv.placa, dv.custo_fixo_km
+ORDER BY litros_por_km DESC;
 ```
 
-**Uso:** Identifica caminhões com baixa eficiência; aciona manutenção ou realocação.
+**Consumo:** Operações identifica caminhões com baixa eficiência (<150 L/km); aciona manutenção preventiva ou realocação de rota.
 
-### KPI: Qualidade de Fornecedor
+### KPI: Rejeições por Fornecedor
 
 ```sql
 SELECT
-  id_cooperado,
-  nome_fazenda,
-  COUNT(DISTINCT lote) as total_lotes,
-  SUM(CASE WHEN status='Rejeitado' THEN 1 ELSE 0 END) as lotes_rejeitados,
-  ROUND(100.0 * SUM(CASE WHEN status='Rejeitado' THEN 1 ELSE 0 END) / 
-        COUNT(*), 2) as taxa_rejeicao_pct
+  dc.id_cooperado,
+  dc.nome_fazenda,
+  dc.municipio,
+  COUNT(DISTINCT fp.id_lote_recebimento) as total_lotes,
+  SUM(CASE WHEN fp.status_lote='Rejeitado' THEN 1 ELSE 0 END) as lotes_rejeitados,
+  ROUND(
+    100.0 * SUM(CASE WHEN fp.status_lote='Rejeitado' THEN 1 ELSE 0 END) / 
+    NULLIF(COUNT(DISTINCT fp.id_lote_recebimento), 0),
+    2
+  ) as taxa_rejeicao_pct,
+  STRING_AGG(DISTINCT fp.motivo_rejeicao, ', ') as motivos
 FROM silver.fact_coleta fc
 INNER JOIN silver.dim_cooperado dc ON fc.id_cooperado = dc.id_cooperado
-GROUP BY id_cooperado, nome_fazenda
+LEFT JOIN silver.fact_processamento fp ON fc.id_veiculo = fp.id_veiculo
+GROUP BY dc.id_cooperado, dc.nome_fazenda, dc.municipio
+HAVING COUNT(DISTINCT fp.id_lote_recebimento) >= 5
 ORDER BY taxa_rejeicao_pct DESC;
 ```
 
-**Uso:** Auditoria de fornecedores; identificar melhorias de higiene.
-
-</details>
-
-<details>
-<summary><b>06. Roadmap Arquitetural</b></summary>
-
-### Fase Atual (MVP)
-
-- [x] Data Contract formalizado
-- [x] Síntese de dados com anomalias
-- [x] Pipeline ETL com DuckDB
-- [x] Silver & Gold em Parquet
-
-### Próximas Fases
-
-**Fase 1 (3-4 sem):** Orquestração
-- [ ] Airflow DAG para execução diária
-- [ ] Logs estruturados e alertas
-- [ ] Backfill de histórico
-
-**Fase 2 (4-6 sem):** Persistência Corporativa
-- [ ] Migração para BigQuery/Snowflake
-- [ ] Schema em PostgreSQL para metadados
-- [ ] dbt para versionamento de SQL
-
-**Fase 3 (2-3 sem):** Data Quality Automática
-- [ ] Great Expectations para validações
-- [ ] dbt tests integrados
-- [ ] Conformidade com Data Contracts
-
-**Fase 4 (4 sem):** Analytics & BI
-- [ ] Looker/Tableau
-- [ ] Dashboards para Ops e Negócio
-- [ ] Self-service analytics
+**Consumo:** Gestão de fornecedores identifica fazendas com taxa > 10% para auditoria de higiene/refrigeração.
 
 </details>
 
@@ -382,15 +374,29 @@ CREATE TABLE IF NOT EXISTS raw.fact_processamento (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ============================================================
--- Índices
--- ============================================================
+-- ================================================================
+-- ÍNDICES (Performance)
+-- ================================================================
 CREATE INDEX IF NOT EXISTS idx_fact_coleta_cooperado 
   ON raw.fact_coleta(id_cooperado);
 CREATE INDEX IF NOT EXISTS idx_fact_coleta_veiculo 
   ON raw.fact_coleta(id_veiculo);
 CREATE INDEX IF NOT EXISTS idx_fact_coleta_data 
   ON raw.fact_coleta(data_hora_coleta);
+CREATE INDEX IF NOT EXISTS idx_fact_processamento_veiculo 
+  ON raw.fact_processamento(id_veiculo);
+
+-- ================================================================
+-- TABELA AUXILIAR: Data Quality Issues (Auditoria)
+-- ================================================================
+CREATE TABLE IF NOT EXISTS raw.data_quality_issues (
+    issue_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    table_name VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    issue_type VARCHAR NOT NULL,
+    description VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
 </details>
@@ -513,6 +519,32 @@ Documentar em `data_contract.md` cria **contato entre Data Engineering e Data Sc
 
 ---
 
+## Known Issues & Tech Debt
+
+Este projeto é um **PoC executável**, não software de produção. As limitações abaixo devem ser resolvidas antes de escalar:
+
+### 1. **Full Load vs Incremental Load**
+- **Problema:** `etl_duckdb.py` usa `CREATE OR REPLACE` na Silver/Gold layer. Cada execução reescreve tudo.
+- **Impacto:** Histórico completo é perdido; impossível auditar quais linhas mudaram; reparação de dados anteriores fica complexa.
+- **Solução Necessária:** Implementar UPSERT/MERGE com watermarks de timestamp. Tabelas de fato precisam de mode `INSERT_OVERWRITE PARTITION` (Spark) ou `MERGE` (DuckDB).
+- **Esforço Estimado:** 2-3 dias | **Responsável:** Futuro Data Engineer em produção
+
+### 2. **Regras Hardcoded para Anomalias**
+- **Problema:** Temperatura nula é **sempre** preenchida com 4.0°C (hardcoded em `etl_duckdb.py`). Sem contexto da fazenda ou dia da coleta.
+- **Impacto:** Estatísticas de temperatura ficam enviesadas; decisões de rejeição terão viés sistemático.
+- **Solução Necessária:** Implementar imputation baseado em histórico por veículo (ex: temperatura média dos últimos 7 dias) ou rejeitar lotes com temp faltante (mais honesto).
+- **Esforço Estimado:** 1-2 dias | **Responsável:** Futuro Data Analyst + DE
+
+### 3. **Orquestração Manual (Sem Airflow)**
+- **Problema:** Pipeline requer execução manual: `python generate_data.py` → `python etl_duckdb.py` → upload manual para BigQuery/Data Lake.
+- **Impacto:** Sem SLA garantido; sem retry automático; sem alertas; sem observabilidade centralizada.
+- **Solução Necessária:** Migrar para Airflow DAGs (ou Cloud Composer/Prefect). Definir YAML de alertas (Slack) e retry policy (3 tentativas, backoff exponencial).
+- **Esforço Estimado:** 3-5 dias | **Responsável:** Data Engineer de infraestrutura (DevOps + DE)
+
+**Status Geral:** MVP funcional com limitações conhecidas. Não usar em decisões críticas do negócio sem validação manual.
+
+---
+
 ## Estrutura de Diretórios
 
 ```
@@ -532,23 +564,6 @@ coopllactia-case/
 │   └── gold/                                  ← Gold (Parquet agregado)
 │
 └── .gitignore
-```
-
----
-
-## Roadmap
-
-```mermaid
-timeline
-    title Roadmap Coopllactia (6-12 meses)
-    section MVP (Atual)
-        Apr 2026 : Data Contract ✓ : Síntese ✓ : ETL ✓
-    section Produção v1
-        Jul 2026 : Airflow : Observabilidade : BigQuery
-    section Produção v2
-        Oct 2026 : dbt : Great Expectations : CI/CD
-    section Analytics
-        Dec 2026 : BI : Dashboards : Self-service
 ```
 
 ---
