@@ -40,6 +40,7 @@ Seguindo o Data Contract estabelecido, o pipeline realiza validações críticas
 - **Integridade Referencial:** Garante que coletas sem um cooperado ou veículo válido sejam tratadas.
 - **Tratamento de Sensores:** Identifica temperaturas nulas (falhas de sensor) e aplica imputação baseada na média ideal (4.0°C) para não descartar o volume total da rota, sinalizando o registro com uma flag de qualidade.
 - **Monitoramento de Acidez:** Validação do pH (alvo: 6.6 a 6.8) para identificar a causa raiz das rejeições na fábrica.
+- **Rastreabilidade Proporcional:** Como o descarte de leite ocorre no nível do caminhão (várias coletas misturadas), o pipeline calcula o **Volume em Risco**. Se um caminhão é rejeitado, o impacto é distribuído proporcionalmente ao volume que cada cooperado entregou naquela rota específica, evitando a contagem duplicada ou incorreta de rejeições.
 
 ---
 
